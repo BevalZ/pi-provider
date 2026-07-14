@@ -54,6 +54,204 @@ pi install git:github.com/BevalZ/pi-provider
 
 密钥建议用环境变量：API key 填 `$MY_PROVIDER_KEY`，再在 shell 中 export。
 
+## 完整菜单说明
+
+以下与输入 `/provider`（或带子命令）后的交互 TUI 一致。
+
+### 主菜单 — `Provider management`
+
+| 菜单项 | 作用 |
+|--------|------|
+| **Add** | 新建 provider；保存前自检 |
+| **Copy** | 深拷贝已有 provider 为新名字 |
+| **Edit** | 编辑字段；保存时自检 |
+| **Remove** | 从活动 `providers` 硬删除（不可恢复） |
+| **Test** | 连通性 / 延迟 / 远程模型列表 |
+| **Check** | 重新探测能力并改写 `compat` / `reasoning` |
+| **Status** | 完整详情 + 再测一次 |
+| **Archive** | 活动 → `archivedProviders` |
+| **Archived** | 浏览归档：详情 / 恢复 / 永久删除 |
+
+---
+
+### Add（添加）流程
+
+| 步骤 | 界面 | 说明 |
+|------|------|------|
+| 1 | 输入 **Provider name** | `models.json` 中的配置 key |
+| 2 | 若名称已存在 | 确认是否覆盖 |
+| 3 | 若名称在归档中 | 是否改为 **激活** 归档项 |
+| 4 | 输入 **Base URL** | 如 `https://api.example.com/v1` |
+| 5 | 输入 **API key** | 支持 `$ENV_VAR` |
+| 6 | 选择 **API type** | 见下表 |
+| 7 | 输入 **Model ID** | 如 `gpt-4` |
+| 8 | 输入 **Display name** | 可空，默认用 Model ID |
+| 9 | 选择 **Input types** | Text / Text + Image |
+| 10 | 确认 **Reasoning** | 是否偏好 extended thinking（不支持会自动关） |
+| 11 | **Self-checking…** | 探测端点并改写 `compat` |
+| 12 | 自检失败时 | 确认是否仍按 best-effort 保存 |
+
+**API type**
+
+| 选项 | 含义 |
+|------|------|
+| Openai-completions (OpenAI 兼容) | Chat Completions（最常见中转） |
+| Anthropic-messages (Claude 兼容) | Anthropic Messages |
+| Openai-responses | OpenAI Responses API |
+| Google-generative-ai | Google Generative AI |
+| Mistral-conversations | Mistral |
+
+**Input types**
+
+| 选项 | 含义 |
+|------|------|
+| Text | 仅文本 |
+| Text + Image | 文本 + 图片 |
+
+---
+
+### Copy（复制）流程
+
+| 步骤 | 说明 |
+|------|------|
+| 选择源 provider | 支持模糊搜索 |
+| 输入新名字 | 目标配置 key |
+| 若目标已存在 | 确认覆盖 |
+| 若目标在归档 | 需先激活或删除归档项 |
+| 深拷贝写入 | 含 models、compat、key、headers 等 |
+
+---
+
+### Edit 菜单 — `Edit provider: <name>`
+
+| 字段 | 功能 |
+|------|------|
+| **Config name** | 重命名 provider key |
+| **Endpoint** | 修改 `baseUrl` |
+| **API key** | 修改密钥（回车保留原值） |
+| **Name field** | 显示名；输入 `-` 清空 |
+| **API type** | 与 Add 相同的 API type 菜单 |
+| **Models** | 选择模型 → 进入模型编辑 |
+| **s Save** | 自检后保存 |
+| **x Discard** | 丢弃修改 |
+
+**Edit model**（选中某个 model 后）
+
+| 字段 | 功能 |
+|------|------|
+| **ID** | Model id |
+| **Name** | 显示名 |
+| **Context window** | 上下文 token |
+| **Max output** | 最大输出 token |
+| **s Save / x Back** | 保存模型草稿或返回 |
+
+保存 provider 时：自检 → 失败可选仍保存 → 写 `models.json` → refresh registry。
+
+---
+
+### Remove（删除）
+
+| 步骤 | 说明 |
+|------|------|
+| 选择 provider | |
+| **Confirm deletion** | 从活动列表永久删除 |
+| 提示 | 以后可能还要用请优先 **Archive** |
+
+---
+
+### Test（测试）结果
+
+| 步骤 | 说明 |
+|------|------|
+| 选择 provider | |
+| 探测请求 | OpenAI 系流式 chat / Anthropic messages 等 |
+| 结果页 | 状态、延迟、TTFB、Connect |
+| 远程 `/models` | 多列列表；`[*]` = 当前已注册 |
+
+---
+
+### Check（能力再探测）
+
+| 步骤 | 说明 |
+|------|------|
+| 选择 provider | |
+| **Reasoning preference** | 是否仍尝试开启 extended thinking |
+| **Self-checking…** | 与 Add 相同的探测 |
+| 失败时 | 可选写入 best-effort 标志 |
+| 落盘 | 更新 `compat` 与各 model 的 `reasoning` / `thinkingLevelMap` |
+
+---
+
+### Status 视图 — `Status: <name>`
+
+展示内容：
+
+- Provider / Endpoint / API / API key 预览 / Status
+- **Performance**：Latency、TTFB、Connect
+- **Compatibility**：当前 `compat` 键值
+- **Models**：reasoning、input、context、max output、thinking map
+- **Remote models**：云端列表 vs 已注册
+
+**Next action**
+
+| 选项 | 功能 |
+|------|------|
+| **Refresh** | 重测当前 provider |
+| **Back** | 选择其他 provider |
+| **Exit** | 返回聊天 |
+
+---
+
+### Archive（归档）
+
+| 步骤 | 说明 |
+|------|------|
+| 选择活动 provider | |
+| 确认 | |
+| 效果 | 移入 `archivedProviders`（带 `archivedAt`），并从活动列表移除 |
+
+---
+
+### Archived（归档浏览器）
+
+| 操作 | 功能 |
+|------|------|
+| 选择归档项 | 支持模糊列表 |
+| **Details** | 查看 endpoint、API、models、归档时间 |
+| **Restore** | 重新激活（同 Activate） |
+| **Delete** | 从归档中永久删除 |
+| **← Back** | 退出操作菜单 |
+
+---
+
+### Activate（激活归档）
+
+| 步骤 | 说明 |
+|------|------|
+| 选择归档名（或命令行传名） | |
+| 若活动侧同名冲突 | 确认覆盖 |
+| 效果 | 去掉 `archivedAt`，写回 `providers`，并从归档删除 |
+
+命令别名：`activate` · `unarchive` · `restore`
+
+---
+
+### 命令速查
+
+```text
+/provider
+/provider add
+/provider copy [name]
+/provider edit [name]
+/provider remove
+/provider test
+/provider check [name]
+/provider status
+/provider archive [name]
+/provider archived   # 或: list
+/provider activate [name]
+```
+
 ## 自检（OpenAI 系）
 
 在 **add** / **edit 保存** / **check** 时，对 `openai-completions` 与 `openai-responses` 探测：
