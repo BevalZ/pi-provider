@@ -1,0 +1,10 @@
+node_modules/
+*.bak-*
+.env
+.env.*
+package-lock.json
+.DS_Store
+Thumbs.db
+*.log
+models.json
+sync_config.json
