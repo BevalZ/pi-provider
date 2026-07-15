@@ -118,12 +118,25 @@ interface AdaptResult {
   availableModels?: string[];
 }
 
+interface ParsedApiError {
+  /** Human-readable error message (from error.message or top-level message). */
+  message: string;
+  /** OpenAI error type, e.g. "invalid_request_error". */
+  type?: string;
+  /** Offending parameter path, e.g. "reasoning_effort" or "messages[0].role". */
+  param?: string;
+  /** Machine code, e.g. "unknown_parameter", "unsupported_value". */
+  code?: string;
+}
+
 interface ChatProbeOutcome {
   ok: boolean;
   status: number;
   body: string;
   /** True when the request reached the API and auth was accepted (even if params were bad). */
   reachable: boolean;
+  /** Structured error parsed from the response body, when available. */
+  error?: ParsedApiError;
 }
 
 // ─── File I/O ─────────────────────────────────────────────────────────
@@ -374,7 +387,107 @@ function isOpenAiFamily(api: string): boolean {
   return api === "openai-completions" || api === "openai-responses";
 }
 
-function looksLikeUnsupportedParam(body: string, param: string): boolean {
+/**
+ * Parse an OpenAI-style error body into structured fields.
+ *
+ * Handles the common shapes:
+ *   { "error": { "message", "type", "param", "code" } }
+ *   { "error": "string message" }
+ *   { "message": "...", "code": "..." }
+ * Returns undefined when the body is not JSON or has no recognizable error.
+ */
+function parseApiError(body: string): ParsedApiError | undefined {
+  const trimmed = body.trim();
+  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return undefined;
+  let json: unknown;
+  try {
+    json = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  const root = (json && typeof json === "object") ? json as Record<string, unknown> : undefined;
+  if (!root) return undefined;
+
+  const err = root.error;
+  const asString = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+
+  if (typeof err === "string") {
+    return { message: err };
+  }
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    return {
+      message: asString(e.message) ?? asString(root.message) ?? "",
+      type: asString(e.type),
+      param: asString(e.param),
+      code: asString(e.code),
+    };
+  }
+  // Fallback: top-level message/code (some gateways flatten the shape).
+  const topMessage = asString(root.message) ?? asString(root.detail);
+  if (topMessage || asString(root.code)) {
+    return {
+      message: topMessage ?? "",
+      code: asString(root.code),
+      param: asString(root.param),
+      type: asString(root.type),
+    };
+  }
+  return undefined;
+}
+
+/** Machine codes that reliably mean "this parameter is not accepted". */
+const UNSUPPORTED_PARAM_CODES = new Set([
+  "unknown_parameter",
+  "unsupported_parameter",
+  "unsupported_value",
+  "invalid_parameter",
+  "parameter_not_supported",
+  "extra_forbidden",
+]);
+
+/** Normalize a param path for loose comparison ("body.reasoning_effort" ~ "reasoning_effort"). */
+function paramMatches(param: string | undefined, target: string): boolean {
+  if (!param) return false;
+  const p = param.toLowerCase();
+  const t = target.toLowerCase();
+  // Match the last path segment: "reasoning_effort", "body.reasoning_effort",
+  // "messages[0].role", etc. Split on . [ ] and compare the final token.
+  const lastSegment = p.split(/[.\[\]]+/).filter(Boolean).pop();
+  return p === t || lastSegment === t;
+}
+
+/**
+ * Decide whether a probe failure means `param` is unsupported.
+ *
+ * Priority:
+ *   1. Structured error.param + a known unsupported code → definitive.
+ *   2. Structured error.param matches target (any code) → likely.
+ *   3. Text regex over the message → best-effort fallback.
+ */
+function looksLikeUnsupportedParam(outcome: ChatProbeOutcome | string, param: string): boolean {
+  const body = typeof outcome === "string" ? outcome : outcome.body;
+  const err = typeof outcome === "string" ? parseApiError(outcome) : (outcome.error ?? parseApiError(outcome.body));
+
+  if (err) {
+    const code = err.code?.toLowerCase();
+    // 1) param explicitly named
+    if (paramMatches(err.param, param)) {
+      if (!code) return true;
+      return UNSUPPORTED_PARAM_CODES.has(code) || /unknown|unsupported|invalid|not_?supported|forbidden/.test(code);
+    }
+    // 2) code says a param is unsupported and the message names it
+    if (code && UNSUPPORTED_PARAM_CODES.has(code) && err.message.toLowerCase().includes(param.toLowerCase())) {
+      return true;
+    }
+    // 3) message-only structured error: fall through to regex over the message
+  }
+
+  return regexUnsupportedParam(body, param);
+}
+
+/** Text-only fallback for providers that return non-structured errors. */
+function regexUnsupportedParam(body: string, param: string): boolean {
   const lower = body.toLowerCase();
   const p = param.toLowerCase();
   if (!lower.includes(p)) return false;
@@ -384,7 +497,19 @@ function looksLikeUnsupportedParam(body: string, param: string): boolean {
   );
 }
 
-function looksLikeDeveloperRoleError(body: string): boolean {
+function looksLikeDeveloperRoleError(outcome: ChatProbeOutcome | string): boolean {
+  const body = typeof outcome === "string" ? outcome : outcome.body;
+  const err = typeof outcome === "string" ? parseApiError(outcome) : (outcome.error ?? parseApiError(outcome.body));
+
+  if (err) {
+    // Structured: param points at a message role, or message clearly rejects the developer role.
+    if (paramMatches(err.param, "role") || (err.param && err.param.toLowerCase().includes("messages"))) {
+      if (err.message.toLowerCase().includes("developer")) return true;
+    }
+    const m = err.message.toLowerCase();
+    if (m.includes("developer") && /role|unsupported|invalid|unknown|not (?:be )?supported/.test(m)) return true;
+  }
+
   const lower = body.toLowerCase();
   return (
     (lower.includes("developer") && /unknown|unsupported|invalid|not (?:be )?supported|role/.test(lower))
@@ -392,15 +517,16 @@ function looksLikeDeveloperRoleError(body: string): boolean {
   );
 }
 
-function looksLikeReasoningError(body: string): boolean {
-  const lower = body.toLowerCase();
+function looksLikeReasoningError(outcome: ChatProbeOutcome | string): boolean {
+  const body = typeof outcome === "string" ? outcome : outcome.body;
+  if (looksLikeUnsupportedParam(outcome, "reasoning_effort")) return true;
+  if (looksLikeUnsupportedParam(outcome, "reasoning")) return true;
+
+  const err = typeof outcome === "string" ? parseApiError(outcome) : (outcome.error ?? parseApiError(outcome.body));
+  const text = (err?.message || body).toLowerCase();
   return (
-    looksLikeUnsupportedParam(body, "reasoning_effort")
-    || looksLikeUnsupportedParam(body, "reasoning")
-    || (
-      /reasoning[_ ]?effort|enable_thinking|thinking/.test(lower)
-      && /unknown|unsupported|invalid|not (?:be )?supported|not allowed/.test(lower)
-    )
+    /reasoning[_ ]?effort|enable_thinking|thinking/.test(text)
+    && /unknown|unsupported|invalid|not (?:be )?supported|not allowed/.test(text)
   );
 }
 
@@ -432,7 +558,13 @@ async function probeOpenAiChat(
     const text = await readResponseBody(resp);
     // 401/403 = auth, not capability. 2xx / 4xx param errors are useful.
     const reachable = resp.status !== 401 && resp.status !== 403;
-    return { ok: resp.ok, status: resp.status, body: text, reachable };
+    return {
+      ok: resp.ok,
+      status: resp.status,
+      body: text,
+      reachable,
+      error: resp.ok ? undefined : parseApiError(text),
+    };
   } catch (error) {
     return {
       ok: false,
@@ -518,7 +650,7 @@ async function selfCheckAndAdaptProvider(
     };
   }
   if (!baseline.ok) {
-    if (looksLikeUnsupportedParam(baseline.body, "max_completion_tokens")) {
+    if (looksLikeUnsupportedParam(baseline, "max_completion_tokens")) {
       maxTokensField = "max_tokens";
       changes.push('maxTokensField → "max_tokens" (max_completion_tokens rejected)');
       baseline = await probeOpenAiChat(
@@ -538,7 +670,7 @@ async function selfCheckAndAdaptProvider(
     if (r.ok) {
       supportsStore = true;
       changes.push("supportsStore → true");
-    } else if (r.reachable && looksLikeUnsupportedParam(r.body, "store")) {
+    } else if (r.reachable && looksLikeUnsupportedParam(r, "store")) {
       supportsStore = false;
     }
   }
@@ -554,8 +686,8 @@ async function selfCheckAndAdaptProvider(
     if (r.ok) {
       supportsUsageInStreaming = true;
     } else if (r.reachable && (
-      looksLikeUnsupportedParam(r.body, "stream_options")
-      || looksLikeUnsupportedParam(r.body, "include_usage")
+      looksLikeUnsupportedParam(r, "stream_options")
+      || looksLikeUnsupportedParam(r, "include_usage")
     )) {
       supportsUsageInStreaming = false;
       changes.push("supportsUsageInStreaming → false");
@@ -575,7 +707,7 @@ async function selfCheckAndAdaptProvider(
     if (r.ok) {
       supportsDeveloperRole = true;
       changes.push("supportsDeveloperRole → true");
-    } else if (r.reachable && looksLikeDeveloperRoleError(r.body)) {
+    } else if (r.reachable && looksLikeDeveloperRoleError(r)) {
       supportsDeveloperRole = false;
     }
   }
@@ -591,7 +723,7 @@ async function selfCheckAndAdaptProvider(
       supportsReasoningEffort = true;
       reasoningOk = true;
       changes.push("supportsReasoningEffort → true (reasoning_effort accepted)");
-    } else if (r.reachable && looksLikeReasoningError(r.body)) {
+    } else if (r.reachable && looksLikeReasoningError(r)) {
       supportsReasoningEffort = false;
       reasoningOk = false;
       changes.push("supportsReasoningEffort → false (reasoning_effort rejected)");
@@ -622,7 +754,7 @@ async function selfCheckAndAdaptProvider(
       // Accepted empty reasoning_content — many gateways that need it on replay also accept it.
       requiresReasoningContent = true;
       changes.push("requiresReasoningContentOnAssistantMessages → true");
-    } else if (r.reachable && looksLikeUnsupportedParam(r.body, "reasoning_content")) {
+    } else if (r.reachable && looksLikeUnsupportedParam(r, "reasoning_content")) {
       requiresReasoningContent = false;
       changes.push("requiresReasoningContentOnAssistantMessages → false");
     } else {

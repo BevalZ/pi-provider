@@ -290,6 +290,7 @@ pi-provider/
   README.zh-CN.md
   scripts/
     sync-shared.mjs   # keep vendored files in sync with local Pi install
+    detect-test.mjs   # smoke tests for structured error detection
   extensions/
     provider/
       index.ts          # /provider command
@@ -311,6 +312,7 @@ copies drift over time, so a sync script keeps them aligned:
 ```bash
 npm run sync-shared     # copy canonical (local Pi install) → package
 npm run check-shared    # exit 1 if any vendored file differs (CI / pre-release)
+npm test                # smoke tests for the structured error detectors
 ```
 
 Source resolution: `--source <dir>` → `$PI_EXTENSIONS_DIR` → `~/.pi/agent/extensions`.
@@ -323,6 +325,12 @@ Run `check-shared` before tagging a release so published files never lag behind 
 - Self-check sends minimal chat probes (`"hi"`, `max_tokens: 1`) to **your** base URL only
 
 ## Changelog
+
+### v1.1.0
+
+- Structured error detection: prefer OpenAI-style `error.param` / `error.code` / `error.type` over text matching, with regex as fallback — fewer false positives on rate-limit / model-not-found errors
+- `sync-shared` script keeps vendored files aligned with the local Pi install
+- `detect-test` smoke tests for the capability detectors
 
 ### v1.0.0
 
