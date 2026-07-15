@@ -288,6 +288,8 @@ pi-provider/
   LICENSE
   README.md
   README.zh-CN.md
+  scripts/
+    sync-shared.mjs   # keep vendored files in sync with local Pi install
   extensions/
     provider/
       index.ts          # /provider command
@@ -299,6 +301,20 @@ pi-provider/
       json-io.ts
       fetch-utils.ts
 ```
+
+## Development
+
+The package vendors `provider/index.ts` plus a few `_shared/*` helpers that are
+also edited in-place in a live Pi install (`~/.pi/agent/extensions`). Those
+copies drift over time, so a sync script keeps them aligned:
+
+```bash
+npm run sync-shared     # copy canonical (local Pi install) → package
+npm run check-shared    # exit 1 if any vendored file differs (CI / pre-release)
+```
+
+Source resolution: `--source <dir>` → `$PI_EXTENSIONS_DIR` → `~/.pi/agent/extensions`.
+Run `check-shared` before tagging a release so published files never lag behind local edits.
 
 ## Security
 

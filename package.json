@@ -11,6 +11,10 @@
     "url": "https://github.com/BevalZ/pi-provider/issues"
   },
   "homepage": "https://github.com/BevalZ/pi-provider#readme",
+  "scripts": {
+    "sync-shared": "node scripts/sync-shared.mjs",
+    "check-shared": "node scripts/sync-shared.mjs --check"
+  },
   "pi": {
     "extensions": ["./extensions/provider"],
     "image": "https://img.shields.io/badge/pi-provider-manager-blue"

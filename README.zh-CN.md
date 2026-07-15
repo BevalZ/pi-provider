@@ -288,6 +288,8 @@ pi-provider/
   LICENSE
   README.md
   README.zh-CN.md
+  scripts/
+    sync-shared.mjs   # 与本机 Pi 安装保持 vendored 文件同步
   extensions/
     provider/
       index.ts          # /provider 命令
@@ -299,6 +301,20 @@ pi-provider/
       json-io.ts
       fetch-utils.ts
 ```
+
+## 开发
+
+包内 vendored 了 `provider/index.ts` 和几个 `_shared/*` helper，而这些文件在本机
+Pi 安装（`~/.pi/agent/extensions`）里是就地编辑的，时间久了两边会漂移。用同步脚本
+保持一致：
+
+```bash
+npm run sync-shared     # 从本机 Pi 安装（权威源）拷贝到包
+npm run check-shared    # 有任何 vendored 文件不一致则 exit 1（CI / 发布前）
+```
+
+源解析顺序：`--source <dir>` → `$PI_EXTENSIONS_DIR` → `~/.pi/agent/extensions`。
+发布打 tag 前先跑 `check-shared`，确保发布文件不落后于本机改动。
 
 ## 安全
 
