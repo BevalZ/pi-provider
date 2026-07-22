@@ -4,9 +4,9 @@
  * Manage custom providers in ~/.pi/agent/models.json
  *
  * Commands:
- *   /provider add       - Add a new provider (self-check + adaptive compat)
+ *   /provider add       - Add a new provider (save now, background self-check)
  *   /provider copy      - Copy an existing provider to a new name
- *   /provider edit      - Edit an existing provider (self-check on save)
+ *   /provider edit      - Edit an existing provider (save now, background self-check)
  *   /provider remove    - Remove an existing provider
  *   /provider test      - Test provider connectivity & performance
  *   /provider check     - Re-probe capabilities and rewrite compat/reasoning
@@ -15,10 +15,10 @@
  *   /provider archived  - Open archived provider list and reactivate
  *   /provider activate  - Reactivate archived provider
  *
- * Self-check (OpenAI-family): after add/edit save (and via /provider check),
- * probes the endpoint for max tokens field, store, stream usage, developer role,
- * and reasoning_effort. Unsupported features are written as false / stripped so
- * models.json matches what the gateway actually accepts.
+ * Self-check (OpenAI-family):
+ *   - add/edit save immediately (hot-switch), then run quick self-check in the background
+ *   - /provider check runs the full probe (store, stream usage, developer role, etc.)
+ * Unsupported features are written as false / stripped so models.json matches the gateway.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -45,7 +45,12 @@ const API_KEY_PREVIEW_LENGTH = 8;
 const MS_PER_SECOND = 1000;
 const CONTEXT_THRESHOLD_THOUSAND = 1_000;
 const CONTEXT_THRESHOLD_MILLION = 1_000_000;
+/** Full connectivity/performance tests and /provider check. */
 const PROVIDER_TEST_FETCH_TIMEOUT_MS = 30 * MS_PER_SECOND;
+/** add/edit quick self-check — fail fast so save is not blocked on slow gateways. */
+const PROVIDER_QUICK_FETCH_TIMEOUT_MS = 8 * MS_PER_SECOND;
+
+type SelfCheckMode = "quick" | "full";
 
 function withDefaultHeaders(headers?: Record<string, string>): Record<string, string> {
   const merged = { ...(headers ?? {}) };
@@ -234,6 +239,14 @@ async function testProviderPerformance(
   const initStart = performance.now();
 
   try {
+    if (api === "google-generative-ai" || api === "mistral-conversations") {
+      return {
+        success: false,
+        message: `Automated connectivity testing is not implemented for ${api}; configuration was not adapted`,
+        timing: { connectMs: 0, ttfbMs: 0, totalMs: 0 },
+      };
+    }
+
     if (api === "anthropic-messages") {
       // ── Anthropic: connectivity test ──
       const connectStart = performance.now();
@@ -253,10 +266,13 @@ async function testProviderPerformance(
       }, PROVIDER_TEST_FETCH_TIMEOUT_MS);
       const ttfb = performance.now() - connectStart;
 
-      if (resp.status === 401) {
+      if (!resp.ok) {
+        await resp.body?.cancel().catch(() => undefined);
         return {
           success: false,
-          message: "Invalid API key",
+          message: resp.status === 401 || resp.status === 403
+            ? "Invalid API key"
+            : `Provider returned HTTP ${resp.status}`,
           timing: { connectMs: ttfb, ttfbMs: ttfb, totalMs: ttfb },
         };
       }
@@ -286,26 +302,39 @@ async function testProviderPerformance(
     } else {
       // ── OpenAI-compatible: latency + TTFT via streaming ──
       const reqStart = performance.now();
-      const resp = await fetchWithTimeout(`${cleanBase}/chat/completions`, {
+      const usesResponsesApi = api === "openai-responses";
+      const endpoint = usesResponsesApi ? "/responses" : "/chat/completions";
+      const requestBody = usesResponsesApi
+        ? {
+            model: models[0]?.id ?? "gpt-4.1-mini",
+            input: "hi",
+            max_output_tokens: TEST_MAX_TOKENS,
+            stream: true,
+          }
+        : {
+            model: models[0]?.id ?? "gpt-3.5-turbo",
+            messages: [{ role: "user", content: "hi" }],
+            max_tokens: TEST_MAX_TOKENS,
+            stream: true,
+          };
+      const resp = await fetchWithTimeout(`${cleanBase}${endpoint}`, {
         method: "POST",
         headers: {
           ...requestHeaders,
           Authorization: `Bearer ${resolvedKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          model: models[0]?.id ?? "gpt-3.5-turbo",
-          messages: [{ role: "user", content: "hi" }],
-          max_tokens: TEST_MAX_TOKENS,
-          stream: true,
-        }),
+        body: JSON.stringify(requestBody),
       }, PROVIDER_TEST_FETCH_TIMEOUT_MS);
 
-      if (resp.status === 401) {
+      if (!resp.ok) {
         const elapsed = performance.now() - reqStart;
+        await resp.body?.cancel().catch(() => undefined);
         return {
           success: false,
-          message: "Invalid API key",
+          message: resp.status === 401 || resp.status === 403
+            ? "Invalid API key"
+            : `Provider returned HTTP ${resp.status}`,
           timing: { connectMs: elapsed, ttfbMs: elapsed, totalMs: elapsed },
         };
       }
@@ -354,7 +383,7 @@ async function testProviderPerformance(
 
       return {
         success: true,
-        message: "Connection successful",
+        message: usesResponsesApi ? "Connection successful (Responses API)" : "Connection successful",
         availableModels,
         timing: {
           connectMs: Math.round(connectMs),
@@ -384,7 +413,8 @@ const DEFAULT_THINKING_LEVEL_MAP: Record<string, string | null> = {
 };
 
 function isOpenAiFamily(api: string): boolean {
-  return api === "openai-completions" || api === "openai-responses";
+  // Capability adaptation below probes chat/completions-specific parameters.
+  return api === "openai-completions";
 }
 
 /**
@@ -544,6 +574,7 @@ async function probeOpenAiChat(
   resolvedKey: string,
   requestHeaders: Record<string, string>,
   body: Record<string, unknown>,
+  timeoutMs = PROVIDER_TEST_FETCH_TIMEOUT_MS,
 ): Promise<ChatProbeOutcome> {
   try {
     const resp = await fetchWithTimeout(`${cleanBase}/chat/completions`, {
@@ -554,7 +585,7 @@ async function probeOpenAiChat(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-    }, PROVIDER_TEST_FETCH_TIMEOUT_MS);
+    }, timeoutMs);
     const text = await readResponseBody(resp);
     // 401/403 = auth, not capability. 2xx / 4xx param errors are useful.
     const reachable = resp.status !== 401 && resp.status !== 403;
@@ -588,12 +619,15 @@ function baseChatBody(modelId: string, maxTokensField: "max_completion_tokens" |
  * Probe an OpenAI-compatible provider and rewrite compat/model flags so the
  * written config matches what the endpoint actually accepts.
  *
- * Detects: max tokens field, store, stream usage, developer role,
- * reasoning_effort / reasoning content requirements.
+ * mode:
+ *   - "quick" (add/edit): baseline chat + optional reasoning only (short timeout)
+ *   - "full"  (/provider check): also store, stream usage, developer role,
+ *             reasoning_content, and remote model list
  */
 async function selfCheckAndAdaptProvider(
   provider: ProviderConfig,
   preferredReasoning?: boolean,
+  mode: SelfCheckMode = "full",
 ): Promise<AdaptResult> {
   const changes: string[] = [];
   const modelId = provider.models[0]?.id;
@@ -601,8 +635,22 @@ async function selfCheckAndAdaptProvider(
     return { ok: false, message: "No model id to probe", changes };
   }
 
-  // Anthropic / Google / Mistral: only connectivity is checked today.
+  const timeoutMs = mode === "quick"
+    ? PROVIDER_QUICK_FETCH_TIMEOUT_MS
+    : PROVIDER_TEST_FETCH_TIMEOUT_MS;
+
+  // Anthropic / Google / Mistral: connectivity only (no chat/completions compat).
   if (!isOpenAiFamily(provider.api)) {
+    if (mode === "quick") {
+      const quick = await quickConnectivityCheck(provider, timeoutMs);
+      return {
+        ok: quick.ok,
+        message: quick.ok
+          ? `Connectivity OK (${provider.api}); run /provider check for a full probe`
+          : quick.message,
+        changes,
+      };
+    }
     const perf = await testProviderPerformance(
       provider.baseUrl,
       provider.apiKey,
@@ -627,7 +675,7 @@ async function selfCheckAndAdaptProvider(
     ? preferredReasoning
     : provider.models.some((m) => m.reasoning);
 
-  // Start from a conservative baseline, then enable features we can prove work.
+  // Conservative defaults; full mode enables features only when proven.
   let maxTokensField: "max_completion_tokens" | "max_tokens" = "max_completion_tokens";
   let supportsStore = false;
   let supportsDeveloperRole = false;
@@ -638,7 +686,9 @@ async function selfCheckAndAdaptProvider(
 
   // 1) Baseline chat — try max_completion_tokens first, fall back to max_tokens.
   let baseline = await probeOpenAiChat(
-    cleanBase, resolvedKey, requestHeaders, baseChatBody(modelId, "max_completion_tokens"),
+    cleanBase, resolvedKey, requestHeaders,
+    baseChatBody(modelId, "max_completion_tokens"),
+    timeoutMs,
   );
   if (!baseline.reachable) {
     return {
@@ -654,71 +704,23 @@ async function selfCheckAndAdaptProvider(
       maxTokensField = "max_tokens";
       changes.push('maxTokensField → "max_tokens" (max_completion_tokens rejected)');
       baseline = await probeOpenAiChat(
-        cleanBase, resolvedKey, requestHeaders, baseChatBody(modelId, "max_tokens"),
+        cleanBase, resolvedKey, requestHeaders,
+        baseChatBody(modelId, "max_tokens"),
+        timeoutMs,
       );
     }
   }
   if (!baseline.ok && baseline.reachable) {
-    // Still failing with a basic body — surface the error; keep probing best-effort.
     changes.push(`baseline chat failed HTTP ${baseline.status}: ${baseline.body.slice(0, 160)}`);
   }
 
-  // 2) store field
-  {
-    const body = { ...baseChatBody(modelId, maxTokensField), store: false };
-    const r = await probeOpenAiChat(cleanBase, resolvedKey, requestHeaders, body);
-    if (r.ok) {
-      supportsStore = true;
-      changes.push("supportsStore → true");
-    } else if (r.reachable && looksLikeUnsupportedParam(r, "store")) {
-      supportsStore = false;
-    }
-  }
-
-  // 3) stream_options.include_usage
-  {
-    const body = {
-      ...baseChatBody(modelId, maxTokensField),
-      stream: true,
-      stream_options: { include_usage: true },
-    };
-    const r = await probeOpenAiChat(cleanBase, resolvedKey, requestHeaders, body);
-    if (r.ok) {
-      supportsUsageInStreaming = true;
-    } else if (r.reachable && (
-      looksLikeUnsupportedParam(r, "stream_options")
-      || looksLikeUnsupportedParam(r, "include_usage")
-    )) {
-      supportsUsageInStreaming = false;
-      changes.push("supportsUsageInStreaming → false");
-    }
-  }
-
-  // 4) developer role (only relevant when reasoning is desired / system-ish roles matter)
-  {
-    const body = {
-      ...baseChatBody(modelId, maxTokensField),
-      messages: [
-        { role: "developer", content: "You are a test." },
-        { role: "user", content: "hi" },
-      ],
-    };
-    const r = await probeOpenAiChat(cleanBase, resolvedKey, requestHeaders, body);
-    if (r.ok) {
-      supportsDeveloperRole = true;
-      changes.push("supportsDeveloperRole → true");
-    } else if (r.reachable && looksLikeDeveloperRoleError(r)) {
-      supportsDeveloperRole = false;
-    }
-  }
-
-  // 5) reasoning_effort
+  // 2) Optional reasoning_effort (needed on both quick and full when preferred).
   if (wantReasoning) {
     const body = {
       ...baseChatBody(modelId, maxTokensField),
       reasoning_effort: "low",
     };
-    const r = await probeOpenAiChat(cleanBase, resolvedKey, requestHeaders, body);
+    const r = await probeOpenAiChat(cleanBase, resolvedKey, requestHeaders, body, timeoutMs);
     if (r.ok) {
       supportsReasoningEffort = true;
       reasoningOk = true;
@@ -727,8 +729,7 @@ async function selfCheckAndAdaptProvider(
       supportsReasoningEffort = false;
       reasoningOk = false;
       changes.push("supportsReasoningEffort → false (reasoning_effort rejected)");
-    } else if (r.ok === false && r.reachable) {
-      // Ambiguous failure — treat as unsupported to keep config safe.
+    } else if (!r.ok && r.reachable) {
       supportsReasoningEffort = false;
       reasoningOk = false;
       changes.push(`supportsReasoningEffort → false (probe HTTP ${r.status})`);
@@ -739,40 +740,101 @@ async function selfCheckAndAdaptProvider(
     changes.push("reasoning disabled by preference / model flag");
   }
 
-  // 6) reasoning_content on assistant (only if reasoning stays on)
-  if (reasoningOk) {
-    const body = {
-      ...baseChatBody(modelId, maxTokensField),
-      messages: [
-        { role: "user", content: "hi" },
-        { role: "assistant", content: "hello", reasoning_content: "" },
-        { role: "user", content: "ok" },
-      ],
-    };
-    const r = await probeOpenAiChat(cleanBase, resolvedKey, requestHeaders, body);
-    if (r.ok) {
-      // Accepted empty reasoning_content — many gateways that need it on replay also accept it.
-      requiresReasoningContent = true;
-      changes.push("requiresReasoningContentOnAssistantMessages → true");
-    } else if (r.reachable && looksLikeUnsupportedParam(r, "reasoning_content")) {
-      requiresReasoningContent = false;
-      changes.push("requiresReasoningContentOnAssistantMessages → false");
-    } else {
-      // If the server requires it only on some paths, keep conservative false unless user wants reasoning.
-      requiresReasoningContent = false;
+  // 3) Full-only probes: store / stream usage / developer role / reasoning_content.
+  // Independent after baseline → run in parallel to cut wall-clock time.
+  if (mode === "full") {
+    const base = baseChatBody(modelId, maxTokensField);
+    const [storeR, streamR, devR, reasoningContentR] = await Promise.all([
+      probeOpenAiChat(
+        cleanBase, resolvedKey, requestHeaders,
+        { ...base, store: false },
+        timeoutMs,
+      ),
+      probeOpenAiChat(
+        cleanBase, resolvedKey, requestHeaders,
+        { ...base, stream: true, stream_options: { include_usage: true } },
+        timeoutMs,
+      ),
+      probeOpenAiChat(
+        cleanBase, resolvedKey, requestHeaders,
+        {
+          ...base,
+          messages: [
+            { role: "developer", content: "You are a test." },
+            { role: "user", content: "hi" },
+          ],
+        },
+        timeoutMs,
+      ),
+      reasoningOk
+        ? probeOpenAiChat(
+          cleanBase, resolvedKey, requestHeaders,
+          {
+            ...base,
+            messages: [
+              { role: "user", content: "hi" },
+              { role: "assistant", content: "hello", reasoning_content: "" },
+              { role: "user", content: "ok" },
+            ],
+          },
+          timeoutMs,
+        )
+        : Promise.resolve(null as ChatProbeOutcome | null),
+    ]);
+
+    if (storeR.ok) {
+      supportsStore = true;
+      changes.push("supportsStore → true");
+    } else if (storeR.reachable && looksLikeUnsupportedParam(storeR, "store")) {
+      supportsStore = false;
     }
+
+    if (streamR.ok) {
+      supportsUsageInStreaming = true;
+    } else if (streamR.reachable && (
+      looksLikeUnsupportedParam(streamR, "stream_options")
+      || looksLikeUnsupportedParam(streamR, "include_usage")
+    )) {
+      supportsUsageInStreaming = false;
+      changes.push("supportsUsageInStreaming → false");
+    }
+
+    if (devR.ok) {
+      supportsDeveloperRole = true;
+      changes.push("supportsDeveloperRole → true");
+    } else if (devR.reachable && looksLikeDeveloperRoleError(devR)) {
+      supportsDeveloperRole = false;
+    }
+
+    if (reasoningContentR) {
+      if (reasoningContentR.ok) {
+        requiresReasoningContent = true;
+        changes.push("requiresReasoningContentOnAssistantMessages → true");
+      } else if (
+        reasoningContentR.reachable
+        && looksLikeUnsupportedParam(reasoningContentR, "reasoning_content")
+      ) {
+        requiresReasoningContent = false;
+        changes.push("requiresReasoningContentOnAssistantMessages → false");
+      } else {
+        requiresReasoningContent = false;
+      }
+    }
+  } else {
+    changes.push("quick check: skipped store/stream/developer probes (use /provider check)");
   }
 
-  // Apply compat
-  const nextCompat: Record<string, boolean | string> = {
-    ...(provider.compat ?? {}),
-    supportsStore,
-    supportsDeveloperRole,
-    supportsReasoningEffort,
-    supportsUsageInStreaming,
-    maxTokensField,
-    requiresReasoningContentOnAssistantMessages: requiresReasoningContent,
-  };
+  // Apply compat — quick mode only overwrites fields it actually probed,
+  // so a prior full /provider check is not wiped on edit-save.
+  const nextCompat: Record<string, boolean | string> = { ...(provider.compat ?? {}) };
+  nextCompat.maxTokensField = maxTokensField;
+  nextCompat.supportsReasoningEffort = supportsReasoningEffort;
+  if (mode === "full") {
+    nextCompat.supportsStore = supportsStore;
+    nextCompat.supportsDeveloperRole = supportsDeveloperRole;
+    nextCompat.supportsUsageInStreaming = supportsUsageInStreaming;
+    nextCompat.requiresReasoningContentOnAssistantMessages = requiresReasoningContent;
+  }
   provider.compat = nextCompat;
 
   // Apply per-model reasoning flags
@@ -790,35 +852,96 @@ async function selfCheckAndAdaptProvider(
     }
   }
 
-  // Optional: list remote models
+  // Optional remote model list — full mode only (can be slow / rate-limited).
   let availableModels: string[] | undefined;
-  try {
-    const modelsResp = await fetchWithTimeout(`${cleanBase}/models`, {
-      headers: { ...requestHeaders, Authorization: `Bearer ${resolvedKey}` },
-    }, PROVIDER_TEST_FETCH_TIMEOUT_MS);
-    if (modelsResp.ok) {
-      const data = (await modelsResp.json()) as { data?: Array<{ id: string }> };
-      availableModels = data.data?.map((m) => m.id);
+  if (mode === "full") {
+    try {
+      const modelsResp = await fetchWithTimeout(`${cleanBase}/models`, {
+        headers: { ...requestHeaders, Authorization: `Bearer ${resolvedKey}` },
+      }, timeoutMs);
+      if (modelsResp.ok) {
+        const data = (await modelsResp.json()) as { data?: Array<{ id: string }> };
+        availableModels = data.data?.map((m) => m.id);
+      }
+    } catch {
+      // optional
     }
-  } catch {
-    // optional
   }
 
-  const ok = baseline.ok || baseline.reachable;
+  const ok = baseline.ok;
   const summaryParts = [
-    ok ? "self-check OK" : "self-check partial",
+    ok ? (mode === "quick" ? "quick-check OK" : "self-check OK") : (mode === "quick" ? "quick-check partial" : "self-check partial"),
     `maxTokens=${maxTokensField}`,
     `reasoning=${enableReasoning}`,
-    `store=${supportsStore}`,
-    `developerRole=${supportsDeveloperRole}`,
-    `streamUsage=${supportsUsageInStreaming}`,
   ];
+  if (mode === "full") {
+    summaryParts.push(
+      `store=${supportsStore}`,
+      `developerRole=${supportsDeveloperRole}`,
+      `streamUsage=${supportsUsageInStreaming}`,
+    );
+  } else {
+    summaryParts.push("full probe: /provider check");
+  }
   return {
     ok,
     message: summaryParts.join(" · "),
     changes,
     availableModels,
   };
+}
+
+/** Lightweight reachability check for non-OpenAI APIs during add/edit. */
+async function quickConnectivityCheck(
+  provider: ProviderConfig,
+  timeoutMs: number,
+): Promise<{ ok: boolean; message: string }> {
+  const resolvedKey = resolveApiKey(provider.apiKey);
+  const requestHeaders = withDefaultHeaders(provider.headers);
+  const cleanBase = provider.baseUrl.replace(/\/$/, "");
+  const modelId = provider.models[0]?.id ?? "";
+
+  try {
+    if (provider.api === "anthropic-messages") {
+      const resp = await fetchWithTimeout(`${cleanBase}/messages`, {
+        method: "POST",
+        headers: {
+          ...requestHeaders,
+          "x-api-key": resolvedKey,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: modelId || "claude-3-haiku-20240307",
+          max_tokens: TEST_MAX_TOKENS,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      }, timeoutMs);
+      if (resp.status === 401 || resp.status === 403) {
+        return { ok: false, message: `Auth failed (HTTP ${resp.status})` };
+      }
+      // Any non-auth response means the endpoint is reachable.
+      return { ok: true, message: `HTTP ${resp.status}` };
+    }
+
+    // google / mistral / other: only hit base URL (or /models-style) with auth header
+    const resp = await fetchWithTimeout(cleanBase, {
+      method: "GET",
+      headers: {
+        ...requestHeaders,
+        Authorization: `Bearer ${resolvedKey}`,
+      },
+    }, timeoutMs);
+    if (resp.status === 401 || resp.status === 403) {
+      return { ok: false, message: `Auth failed (HTTP ${resp.status})` };
+    }
+    return { ok: true, message: `HTTP ${resp.status}` };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function formatAdaptSummary(result: AdaptResult): string {
@@ -829,6 +952,130 @@ function formatAdaptSummary(result: AdaptResult): string {
     if (result.changes.length > 12) lines.push(`  … +${result.changes.length - 12} more`);
   }
   return lines.join("\n");
+}
+
+/** Fingerprint used to ignore stale background self-check results after re-edit. */
+function providerCheckFingerprint(provider: ProviderConfig): string {
+  return [
+    provider.baseUrl.replace(/\/$/, ""),
+    provider.api,
+    provider.apiKey,
+    provider.models[0]?.id ?? "",
+  ].join("\0");
+}
+
+/** Minimal UI surface needed after a command handler returns. */
+interface BgUi {
+  notify: (message: string, type?: "info" | "warning" | "error") => void;
+  setStatus?: (key: string, value: string | undefined) => void;
+}
+
+interface BgSelfCheckOpts {
+  providerName: string;
+  /** Snapshot at schedule time — probe this, never re-read mid-flight. */
+  providerSnapshot: ProviderConfig;
+  preferredReasoning?: boolean;
+  mode?: SelfCheckMode;
+  ui: BgUi;
+  refresh: () => void;
+}
+
+/** In-flight background self-checks keyed by provider name (latest generation wins). */
+const bgSelfCheckGen = new Map<string, number>();
+
+/**
+ * Fire-and-forget self-check after add/edit save.
+ * On success, merges adaptive flags into models.json only if the provider
+ * fingerprint still matches (avoids overwriting a concurrent edit).
+ */
+function scheduleBackgroundSelfCheck(opts: BgSelfCheckOpts): void {
+  const {
+    providerName,
+    providerSnapshot,
+    preferredReasoning,
+    mode = "quick",
+    ui,
+    refresh,
+  } = opts;
+  const gen = (bgSelfCheckGen.get(providerName) ?? 0) + 1;
+  bgSelfCheckGen.set(providerName, gen);
+  const fingerprint = providerCheckFingerprint(providerSnapshot);
+  const statusKey = `provider-check:${providerName}`;
+
+  try {
+    ui.setStatus?.(statusKey, `self-check: ${providerName}…`);
+  } catch {
+    // UI may be unavailable outside TUI
+  }
+  ui.notify(`Background ${mode} self-check started for "${providerName}"`, "info");
+
+  void (async () => {
+    try {
+      const draft = deepClone(providerSnapshot);
+      const adapt = await selfCheckAndAdaptProvider(draft, preferredReasoning, mode);
+
+      // Stale generation (newer check scheduled for same name)
+      if (bgSelfCheckGen.get(providerName) !== gen) return;
+
+      const config = readModelsJson();
+      const current = config.providers[providerName];
+      if (!current) {
+        ui.notify(
+          `Self-check for "${providerName}" finished, but provider was removed — skipped write`,
+          "warning",
+        );
+        return;
+      }
+      if (providerCheckFingerprint(current) !== fingerprint) {
+        ui.notify(
+          `Self-check for "${providerName}" finished, but config changed — skipped write`,
+          "warning",
+        );
+        return;
+      }
+
+      // Merge only fields self-check owns (compat + per-model reasoning),
+      // so concurrent edits to names/limits/headers are preserved.
+      if (draft.compat) current.compat = { ...(current.compat ?? {}), ...draft.compat };
+      const draftById = new Map(draft.models.map((m) => [m.id, m]));
+      for (const model of current.models) {
+        const adapted = draftById.get(model.id);
+        if (!adapted) continue;
+        model.reasoning = adapted.reasoning;
+        if (adapted.thinkingLevelMap) model.thinkingLevelMap = adapted.thinkingLevelMap;
+        else delete model.thinkingLevelMap;
+      }
+      writeModelsJson(config);
+      try {
+        refresh();
+      } catch {
+        // registry may be gone if session ended
+      }
+
+      ui.notify(
+        `Self-check done for "${providerName}": ${adapt.message}`,
+        adapt.ok ? "info" : "warning",
+      );
+      if (adapt.changes.length > 0) {
+        ui.notify(formatAdaptSummary(adapt), adapt.ok ? "info" : "warning");
+      }
+    } catch (error) {
+      if (bgSelfCheckGen.get(providerName) !== gen) return;
+      ui.notify(
+        `Self-check failed for "${providerName}": ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    } finally {
+      if (bgSelfCheckGen.get(providerName) === gen) {
+        bgSelfCheckGen.delete(providerName);
+        try {
+          ui.setStatus?.(statusKey, undefined);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  })();
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────
@@ -875,9 +1122,9 @@ export default function providerExtension(pi: ExtensionAPI) {
       if (action && known.has(action)) return runAction(action, nameArg);
 
       const selected = await enhancedSelect(ctx, "Provider management", [
-        "Add       — Add a new provider (self-check)",
+        "Add       — Add a new provider (save now, bg self-check)",
         "Copy      — Copy provider to a new name",
-        "Edit      — Edit an existing provider (self-check on save)",
+        "Edit      — Edit an existing provider (save now, bg self-check)",
         "Remove    — Remove a provider",
         "Test      — Test provider connectivity",
         "Check     — Re-probe capabilities & adapt compat",
@@ -975,13 +1222,14 @@ export default function providerExtension(pi: ExtensionAPI) {
     );
     const inputTypes = INPUT_TYPES.find((t) => t.label === inputChoice)?.value ?? ["text"];
 
-    // Preference only — actual capability is decided by self-check below.
+    // Preference only — background self-check may disable reasoning if unsupported.
     const preferReasoning = await ctx.ui.confirm(
       "Reasoning",
-      "Prefer extended thinking if the endpoint supports it? (will self-check and auto-disable if unsupported)",
+      "Prefer extended thinking if the endpoint supports it? (checked in background after save)",
     );
 
-    // Conservative defaults; self-check rewrites compat + model.reasoning.
+    // Conservative defaults so the provider is usable immediately after save.
+    // Background quick-check may enable reasoning / flip maxTokensField when proven.
     const newProvider: ProviderConfig = {
       baseUrl,
       api: apiType,
@@ -1008,23 +1256,20 @@ export default function providerExtension(pi: ExtensionAPI) {
       ],
     };
 
-    ctx.ui.notify(`Self-checking "${providerName}" capabilities…`, "info");
-    const adapt = await selfCheckAndAdaptProvider(newProvider, preferReasoning);
-    if (!adapt.ok) {
-      const stillSave = await ctx.ui.confirm(
-        "Self-check failed",
-        `${adapt.message}\n\nSave provider config anyway (with best-effort adaptive flags)?`,
-      );
-      if (!stillSave) return ctx.ui.notify("Cancelled — provider not saved", "info");
-    }
-
     config.providers[providerName] = newProvider;
     writeModelsJson(config);
-
     ctx.modelRegistry.refresh();
-    ctx.ui.notify(`Provider "${providerName}" added`, "info");
-    ctx.ui.notify(formatAdaptSummary(adapt), adapt.ok ? "info" : "warning");
+    ctx.ui.notify(`Provider "${providerName}" added (ready to use)`, "info");
     notifyModelRegistration(ctx, providerName, modelId, "written");
+
+    scheduleBackgroundSelfCheck({
+      providerName,
+      providerSnapshot: deepClone(newProvider),
+      preferredReasoning: preferReasoning,
+      mode: "quick",
+      ui: ctx.ui,
+      refresh: () => ctx.modelRegistry.refresh(),
+    });
     return;
   }
 
@@ -1195,7 +1440,7 @@ export default function providerExtension(pi: ExtensionAPI) {
       return ctx.ui.notify("Discarded provider edits", "info");
     }
 
-    // Self-check + adaptive compat before persist (same path as /provider add).
+    // Save immediately (hot-switch); self-check runs in background.
     const toSave: ProviderConfig = {
       ...draft,
       headers: withDefaultHeaders(draft.headers),
@@ -1203,23 +1448,25 @@ export default function providerExtension(pi: ExtensionAPI) {
     const preferReasoning = toSave.models.some((m) => m.reasoning)
       || Boolean(toSave.compat?.supportsReasoningEffort);
 
-    ctx.ui.notify(`Self-checking "${draftName}" capabilities…`, "info");
-    const adapt = await selfCheckAndAdaptProvider(toSave, preferReasoning);
-    if (!adapt.ok) {
-      const stillSave = await ctx.ui.confirm(
-        "Self-check failed",
-        `${adapt.message}\n\nSave edited provider anyway (with best-effort adaptive flags)?`,
-      );
-      if (!stillSave) return ctx.ui.notify("Cancelled — edits not saved", "info");
-    }
-
     if (draftName !== name) delete config.providers[name];
     config.providers[draftName] = toSave;
     writeModelsJson(config);
     ctx.modelRegistry.refresh();
-    ctx.ui.notify(`Provider "${name}" saved as "${draftName}"`, "info");
-    ctx.ui.notify(formatAdaptSummary(adapt), adapt.ok ? "info" : "warning");
-    ctx.ui.notify("Run /reload or restart Pi if model list does not refresh", "info");
+    ctx.ui.notify(
+      draftName === name
+        ? `Provider "${name}" saved (ready to use)`
+        : `Provider "${name}" saved as "${draftName}" (ready to use)`,
+      "info",
+    );
+
+    scheduleBackgroundSelfCheck({
+      providerName: draftName,
+      providerSnapshot: deepClone(toSave),
+      preferredReasoning: preferReasoning,
+      mode: "quick",
+      ui: ctx.ui,
+      refresh: () => ctx.modelRegistry.refresh(),
+    });
   }
 
   // ── Remove ──────────────────────────────────────────────────────────
@@ -1438,9 +1685,9 @@ export default function providerExtension(pi: ExtensionAPI) {
         : "Enable extended thinking if the endpoint supports it?",
     );
 
-    ctx.ui.notify(`Self-checking "${name}"...`, "info");
+    ctx.ui.notify(`Full self-checking "${name}"...`, "info");
     const draft = deepClone(provider);
-    const adapt = await selfCheckAndAdaptProvider(draft, preferReasoning);
+    const adapt = await selfCheckAndAdaptProvider(draft, preferReasoning, "full");
 
     if (!adapt.ok) {
       const stillSave = await ctx.ui.confirm(

@@ -15,7 +15,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)。
 
 ```bash
-pi install git:github.com/BevalZ/pi-provider
+pi install git:github.com/BevalZ/pi-provider@v1.2.0
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -24,9 +24,9 @@ pi install git:github.com/BevalZ/pi-provider
 
 ```text
 /provider                 交互管理菜单
-/provider add             添加（保存前自检）
-/provider edit [name]     编辑（保存时自检）
-/provider check [name]    重新探测能力并改写 compat/reasoning
+/provider add             添加（立即保存，后台自检）
+/provider edit [name]     编辑（立即保存，后台自检）
+/provider check [name]    完整重探测；改写 compat/reasoning
 /provider copy [name]     复制为新名称
 /provider remove          删除
 /provider test            连通性与延迟测试
@@ -39,14 +39,14 @@ pi install git:github.com/BevalZ/pi-provider
 ### 首次流程
 
 ```bash
-# 1. 安装
-pi install git:github.com/BevalZ/pi-provider
+# 1. 安装（钉死 release tag，便于多机一致）
+pi install git:github.com/BevalZ/pi-provider@v1.2.0
 
 # 2. 添加
 /provider add
 #    名称 → Base URL → API key → API 类型 → Model ID → 输入类型
-#    是否偏好 reasoning？（不支持会自动关闭）
-#    自检后写入 models.json
+#    是否偏好 reasoning？（后台自检发现不支持会关闭）
+#    配置立即写入；快速自检在后台运行
 
 # 3. 选用模型
 /model
@@ -254,7 +254,15 @@ pi install git:github.com/BevalZ/pi-provider
 
 ## 自检（OpenAI 系）
 
-在 **add** / **edit 保存** / **check** 时，对 `openai-completions` 与 `openai-responses` 探测：
+**时机**
+
+| 触发 | 行为 |
+|------|------|
+| **add** / **edit 保存** | 立即写入 `models.json`（热切换），再在后台跑 **quick** 自检（约 8s 超时）。若探测完成前再次编辑同一 provider，旧结果会被丢弃。 |
+| **`/provider check`** | 跑 **完整** 探测集并改写 `compat` / reasoning。 |
+| **`/provider test`** | 仅连通性 / 延迟（不改写 compat）。 |
+
+对 `openai-completions` 与 `openai-responses`，完整探测覆盖：
 
 | 探测 | 自适应写入 |
 |------|------------|
@@ -267,9 +275,11 @@ pi install git:github.com/BevalZ/pi-provider
 
 不支持的能力会写成 `false` 并去掉 thinking map，避免 Pi 发送被拒参数。
 
-Anthropic / Google / Mistral：目前仅连通性检查（详细 compat 探测仅 OpenAI 系）。
+- **Anthropic**：支持连通性测试。
+- **Google / Mistral**：自动化连通性测试尚未实现；配置保持不变。
+- **`openai-responses`**：测试/探测走 `/responses` 端点（非 chat completions）。
 
-自检失败（鉴权 / 网络）时，仍可选择按 best-effort 保存。
+后台自检失败（鉴权 / 网络）时，已保存的配置保留；端点可用后再跑 `/provider check`。
 
 ## 管理范围
 
@@ -325,6 +335,14 @@ npm test                # 运行结构化错误判定的冒烟测试
 - 自检仅向**你配置的 base URL** 发送最小 chat 探测（`"hi"`，`max_tokens: 1`）
 
 ## 更新日志
+
+### v1.2.0
+
+- **热切换保存**：add/edit 立即写入 `models.json`，再在后台跑 **quick 自检**（8s 超时），不再阻塞 TUI
+- **完整探测** 仍在 `/provider check`（store、stream usage、developer role、reasoning 等）
+- 连通性测试支持 **`openai-responses`**（`/responses`）；非 401/403 的 HTTP 错误提示更清晰
+- Google / Mistral：返回明确的 “未实现”，避免误导性失败路径
+- 通过 `sync-shared` 将 `json-io`、`fetch-utils` 等 helper 与本机 live 对齐
 
 ### v1.1.0
 

@@ -21,9 +21,13 @@ import { dirname, join } from "node:path";
 
 // ── Timestamp ───────────────────────────────────────────────────────────
 
-/** Compact timestamp for backup file names, e.g. "20260616T143045". */
+let backupSequence = 0;
+
+/** Compact, process-unique timestamp for backup file names. */
 export function timestampForBackup(): string {
-  return new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 18);
+  backupSequence = (backupSequence + 1) % 1_000_000;
+  return `${timestamp}-${process.pid}-${String(backupSequence).padStart(6, "0")}`;
 }
 
 /** ISO-8601 timestamp string, e.g. "2026-06-17T12:30:45.123Z". */
@@ -38,11 +42,21 @@ export function tsCompact(): string {
 
 // ── Safe read ──────────────────────────────────────────────────────────
 
-/** Read JSON with a fallback default. Missing/corrupt file returns fallback. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read JSON with a fallback default. Missing/corrupt files return the fallback.
+ * Plain-object defaults are shallow-merged; arrays and primitives retain their type.
+ */
 export function readJsonSafe<T>(file: string, fallback: T): T {
   try {
-    const data = JSON.parse(readFileSync(file, "utf8"));
-    return { ...fallback, ...data };
+    const data: unknown = JSON.parse(readFileSync(file, "utf8"));
+    if (isPlainRecord(fallback) && isPlainRecord(data)) {
+      return { ...fallback, ...data } as T;
+    }
+    return data as T;
   } catch (_error) {
     return fallback;
   }

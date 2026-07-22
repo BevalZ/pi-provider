@@ -1,6 +1,6 @@
 {
   "name": "pi-provider",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Provider manager for Pi coding agent — add/edit/test providers with adaptive capability self-check",
   "keywords": ["pi-package", "provider", "models", "openai", "coding-agent"],
   "repository": {

@@ -29,18 +29,29 @@ export async function fetchWithTimeout(
     cleanup.push(() => signal.removeEventListener("abort", abort));
   }
 
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const cleanUp = () => {
+    clearTimeout(timeout);
+    for (const removeListener of cleanup.splice(0)) removeListener();
+  };
+  const timeout = setTimeout(() => {
+    controller.abort();
+    cleanUp();
+  }, timeoutMs);
+  timeout.unref?.();
 
   try {
-    // Strip signal from init to avoid conflicts — ours is the merged one
+    // Strip signal from init to avoid conflicts — ours is the merged one.
+    // Keep the timer alive after headers so stalled response bodies are aborted too.
     const { signal: _s, headers, ...rest } = init;
-    return await fetch(url, {
+    const response = await fetch(url, {
       ...rest,
       headers: headers as HeadersInit | undefined,
       signal: controller.signal,
     });
-  } finally {
-    clearTimeout(timeout);
-    for (const removeListener of cleanup) removeListener();
+    if (!response.body) cleanUp();
+    return response;
+  } catch (error) {
+    cleanUp();
+    throw error;
   }
 }

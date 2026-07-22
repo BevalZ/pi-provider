@@ -15,7 +15,7 @@ When you add or edit a provider, pi-provider probes the endpoint and turns off u
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent).
 
 ```bash
-pi install git:github.com/BevalZ/pi-provider
+pi install git:github.com/BevalZ/pi-provider@v1.2.0
 ```
 
 Then restart Pi or run `/reload`.
@@ -24,9 +24,9 @@ Then restart Pi or run `/reload`.
 
 ```text
 /provider                 Interactive management menu
-/provider add             Add a provider (self-check before save)
-/provider edit [name]     Edit a provider (self-check on save)
-/provider check [name]    Re-probe capabilities and rewrite compat/reasoning
+/provider add             Add a provider (save now, background self-check)
+/provider edit [name]     Edit a provider (save now, background self-check)
+/provider check [name]    Full re-probe; rewrite compat/reasoning
 /provider copy [name]     Copy a provider to a new name
 /provider remove          Remove a provider
 /provider test            Connectivity & latency test
@@ -39,14 +39,14 @@ Then restart Pi or run `/reload`.
 ### First-time flow
 
 ```bash
-# 1. Install
-pi install git:github.com/BevalZ/pi-provider
+# 1. Install (pin a release tag for multi-machine consistency)
+pi install git:github.com/BevalZ/pi-provider@v1.2.0
 
 # 2. Add a provider
 /provider add
 #    name → base URL → API key → API type → model id → input types
-#    prefer reasoning? (will auto-disable if unsupported)
-#    self-check runs, then writes models.json
+#    prefer reasoning? (background self-check may disable if unsupported)
+#    config is written immediately; quick self-check runs in the background
 
 # 3. Use the model
 /model
@@ -254,7 +254,15 @@ CLI aliases: `activate` · `unarchive` · `restore`
 
 ## Self-check (OpenAI-family)
 
-After **add** / **edit save** / **check**, for `openai-completions` and `openai-responses` the extension probes:
+**Timing**
+
+| Trigger | Behavior |
+|---------|----------|
+| **add** / **edit save** | Writes `models.json` immediately (hot-switch), then runs a **quick** self-check in the background (~8s timeout). Stale results are ignored if you re-edit the same provider before the probe finishes. |
+| **`/provider check`** | Runs the **full** probe set and rewrites `compat` / reasoning flags. |
+| **`/provider test`** | Connectivity / latency only (no adaptive rewrite). |
+
+For `openai-completions` and `openai-responses` the full probe set covers:
 
 | Probe | Adaptive write |
 |-------|----------------|
@@ -267,9 +275,11 @@ After **add** / **edit save** / **check**, for `openai-completions` and `openai-
 
 Unsupported features are written as `false` and reasoning maps are stripped so Pi does not send rejected parameters.
 
-Anthropic / Google / Mistral: connectivity check only (detailed compat probe is OpenAI-family for now).
+- **Anthropic**: connectivity test supported.
+- **Google / Mistral**: automated connectivity testing is not implemented yet; configuration is left unchanged.
+- **`openai-responses`**: test/probe uses the `/responses` endpoint (not chat completions).
 
-If self-check fails (auth / network), you can still choose to save best-effort flags.
+If a background self-check fails (auth / network), the already-saved config stays; re-run `/provider check` when the endpoint is reachable.
 
 ## What it manages
 
@@ -325,6 +335,14 @@ Run `check-shared` before tagging a release so published files never lag behind 
 - Self-check sends minimal chat probes (`"hi"`, `max_tokens: 1`) to **your** base URL only
 
 ## Changelog
+
+### v1.2.0
+
+- **Hot-switch save**: add/edit write `models.json` immediately, then run a **background quick self-check** (8s timeout) instead of blocking the TUI
+- **Full probe** remains on `/provider check` (store, stream usage, developer role, reasoning, …)
+- Connectivity test supports **`openai-responses`** via `/responses`; clearer non-401/403 HTTP errors
+- Google / Mistral: explicit “not implemented” result instead of a misleading failure path
+- Shared helpers (`json-io`, `fetch-utils`) re-synced from the live Pi install via `sync-shared`
 
 ### v1.1.0
 
