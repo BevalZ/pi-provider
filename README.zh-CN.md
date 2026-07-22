@@ -15,7 +15,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)。
 
 ```bash
-pi install git:github.com/BevalZ/pi-provider@v1.3.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.1
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -41,7 +41,7 @@ pi install git:github.com/BevalZ/pi-provider@v1.3.0
 
 ```bash
 # 1. 安装（钉死 release tag，便于多机一致）
-pi install git:github.com/BevalZ/pi-provider@v1.3.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.1
 
 # 2. 添加
 /provider add
@@ -336,6 +336,11 @@ npm test                # 运行结构化错误判定的冒烟测试
 - 自检仅向**你配置的 base URL** 发送最小 chat 探测（`"hi"`，`max_tokens: 1`）
 
 ## 更新日志
+
+### v1.3.1
+
+- 代码质量：移除未用 `fs` 导入，统一 `errMsg` / HTTP 鉴权错误文案，压缩注释
+- 无 UI/命令行为变更
 
 ### v1.3.0
 

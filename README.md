@@ -15,7 +15,7 @@ When you add or edit a provider, pi-provider probes the endpoint and turns off u
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent).
 
 ```bash
-pi install git:github.com/BevalZ/pi-provider@v1.3.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.1
 ```
 
 Then restart Pi or run `/reload`.
@@ -41,7 +41,7 @@ Then restart Pi or run `/reload`.
 
 ```bash
 # 1. Install (pin a release tag for multi-machine consistency)
-pi install git:github.com/BevalZ/pi-provider@v1.3.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.1
 
 # 2. Add a provider
 /provider add
@@ -336,6 +336,11 @@ Run `check-shared` before tagging a release so published files never lag behind 
 - Self-check sends minimal chat probes (`"hi"`, `max_tokens: 1`) to **your** base URL only
 
 ## Changelog
+
+### v1.3.1
+
+- Code quality: drop unused `fs` import, shared `errMsg` / `httpAuthOrStatus`, tighter comments
+- No UI or command behavior changes
 
 ### v1.3.0
 

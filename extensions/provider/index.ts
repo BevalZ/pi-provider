@@ -23,7 +23,6 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { enhancedSelect, fuzzyMatch } from "../_shared/enhanced-select";
@@ -196,6 +195,16 @@ function resolveApiKey(key: string): string {
   return key;
 }
 
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function httpAuthOrStatus(status: number): string {
+  return status === 401 || status === 403
+    ? "Invalid API key"
+    : `Provider returned HTTP ${status}`;
+}
+
 /** True when baseUrl points at this machine (device-local / provider-proxy). */
 function isLocalhostBaseUrl(baseUrl: string): boolean {
   try {
@@ -230,7 +239,6 @@ function annotatePerfWithLocalHints(baseUrl: string, perf: PerfResult): PerfResu
   if (hints.length === 0) return perf;
   return { ...perf, message: `${perf.message}\n${hints.map((h) => `  ↳ ${h}`).join("\n")}` };
 }
-
 
 // ─── Formatting helpers ───────────────────────────────────────────────
 
@@ -307,9 +315,7 @@ async function testProviderPerformance(
         await resp.body?.cancel().catch(() => undefined);
         return {
           success: false,
-          message: resp.status === 401 || resp.status === 403
-            ? "Invalid API key"
-            : `Provider returned HTTP ${resp.status}`,
+          message: httpAuthOrStatus(resp.status),
           timing: { connectMs: ttfb, ttfbMs: ttfb, totalMs: ttfb },
         };
       }
@@ -369,9 +375,7 @@ async function testProviderPerformance(
         await resp.body?.cancel().catch(() => undefined);
         return {
           success: false,
-          message: resp.status === 401 || resp.status === 403
-            ? "Invalid API key"
-            : `Provider returned HTTP ${resp.status}`,
+          message: httpAuthOrStatus(resp.status),
           timing: { connectMs: elapsed, ttfbMs: elapsed, totalMs: elapsed },
         };
       }
@@ -433,7 +437,7 @@ async function testProviderPerformance(
     const elapsed = performance.now() - initStart;
     return {
       success: false,
-      message: `Connection failed: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Connection failed: ${errMsg(error)}`,
       timing: { connectMs: elapsed, ttfbMs: elapsed, totalMs: elapsed },
     };
   }
@@ -454,15 +458,7 @@ function isOpenAiFamily(api: string): boolean {
   return api === "openai-completions";
 }
 
-/**
- * Parse an OpenAI-style error body into structured fields.
- *
- * Handles the common shapes:
- *   { "error": { "message", "type", "param", "code" } }
- *   { "error": "string message" }
- *   { "message": "...", "code": "..." }
- * Returns undefined when the body is not JSON or has no recognizable error.
- */
+/** Parse OpenAI-style JSON error body into message/type/param/code. */
 function parseApiError(body: string): ParsedApiError | undefined {
   const trimmed = body.trim();
   if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return undefined;
@@ -637,7 +633,7 @@ async function probeOpenAiChat(
     return {
       ok: false,
       status: 0,
-      body: error instanceof Error ? error.message : String(error),
+      body: errMsg(error),
       reachable: false,
     };
   }
@@ -976,7 +972,7 @@ async function quickConnectivityCheck(
   } catch (error) {
     return {
       ok: false,
-      message: error instanceof Error ? error.message : String(error),
+      message: errMsg(error),
     };
   }
 }
@@ -1099,7 +1095,7 @@ function scheduleBackgroundSelfCheck(opts: BgSelfCheckOpts): void {
     } catch (error) {
       if (bgSelfCheckGen.get(providerName) !== gen) return;
       ui.notify(
-        `Self-check failed for "${providerName}": ${error instanceof Error ? error.message : String(error)}`,
+        `Self-check failed for "${providerName}": ${errMsg(error)}`,
         "error",
       );
     } finally {
@@ -1768,7 +1764,7 @@ export default function providerExtension(pi: ExtensionAPI) {
             draft,
           };
         } catch (error) {
-          const msg = error instanceof Error ? error.message : String(error);
+          const msg = errMsg(error);
           rows[my] = {
             name,
             ok: false,
