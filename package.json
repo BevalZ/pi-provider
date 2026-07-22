@@ -1,8 +1,14 @@
 {
   "name": "pi-provider",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Provider manager for Pi coding agent — add/edit/test providers with adaptive capability self-check",
-  "keywords": ["pi-package", "provider", "models", "openai", "coding-agent"],
+  "keywords": [
+    "pi-package",
+    "provider",
+    "models",
+    "openai",
+    "coding-agent"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/BevalZ/pi-provider.git"
@@ -17,7 +23,9 @@
     "test": "node scripts/detect-test.mjs"
   },
   "pi": {
-    "extensions": ["./extensions/provider"],
+    "extensions": [
+      "./extensions/provider"
+    ],
     "image": "https://img.shields.io/badge/pi-provider-manager-blue"
   },
   "peerDependencies": {

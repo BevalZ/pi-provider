@@ -15,7 +15,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)。
 
 ```bash
-pi install git:github.com/BevalZ/pi-provider@v1.2.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.0
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -27,6 +27,7 @@ pi install git:github.com/BevalZ/pi-provider@v1.2.0
 /provider add             添加（立即保存，后台自检）
 /provider edit [name]     编辑（立即保存，后台自检）
 /provider check [name]    完整重探测；改写 compat/reasoning
+/provider check-all         对全部活动 provider 完整自检
 /provider copy [name]     复制为新名称
 /provider remove          删除
 /provider test            连通性与延迟测试
@@ -40,7 +41,7 @@ pi install git:github.com/BevalZ/pi-provider@v1.2.0
 
 ```bash
 # 1. 安装（钉死 release tag，便于多机一致）
-pi install git:github.com/BevalZ/pi-provider@v1.2.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.0
 
 # 2. 添加
 /provider add
@@ -335,6 +336,12 @@ npm test                # 运行结构化错误判定的冒烟测试
 - 自检仅向**你配置的 base URL** 发送最小 chat 探测（`"hi"`，`max_tokens: 1`）
 
 ## 更新日志
+
+### v1.3.0
+
+- **本机 / provider-proxy 提示**：`baseUrl` 为 loopback 且 test/status 失败时给出排查建议
+- Status 对 localhost 端点显示 `[device-local]`
+- **`/provider check-all`**（或 `/provider check --all`）：并发 3 对所有活动 provider 做完整自检并汇总
 
 ### v1.2.0
 

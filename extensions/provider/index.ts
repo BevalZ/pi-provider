@@ -10,6 +10,7 @@
  *   /provider remove    - Remove an existing provider
  *   /provider test      - Test provider connectivity & performance
  *   /provider check     - Re-probe capabilities and rewrite compat/reasoning
+ *   /provider check-all - Full self-check every active provider (concurrency 3)
  *   /provider status    - View provider details & refresh
  *   /provider archive   - Move active provider to archivedProviders
  *   /provider archived  - Open archived provider list and reactivate
@@ -194,6 +195,42 @@ function resolveApiKey(key: string): string {
   }
   return key;
 }
+
+/** True when baseUrl points at this machine (device-local / provider-proxy). */
+function isLocalhostBaseUrl(baseUrl: string): boolean {
+  try {
+    const u = new URL(baseUrl);
+    const host = u.hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+  } catch {
+    return /localhost|127\.0\.0\.1|\[::1\]/i.test(baseUrl);
+  }
+}
+
+/**
+ * Hints when a local endpoint fails — usually provider-proxy not running
+ * or a device-local service that only exists on another machine.
+ */
+function diagnoseLocalEndpointHints(baseUrl: string, failureMessage: string): string[] {
+  if (!isLocalhostBaseUrl(baseUrl)) return [];
+  const hints: string[] = [
+    `Endpoint is device-local (${baseUrl}).`,
+    "If this provider is meant to go through provider-proxy, ensure that extension is loaded and the port matches models.json.",
+    "If this is a machine-only service (e.g. Local2api), it will not work after restore on another device until you start that service here.",
+  ];
+  if (/ECONNREFUSED|fetch failed|network|Failed to fetch|timeout|aborted/i.test(failureMessage)) {
+    hints.push("Connection refused/timeout on loopback usually means nothing is listening on that port yet.");
+  }
+  return hints;
+}
+
+function annotatePerfWithLocalHints(baseUrl: string, perf: PerfResult): PerfResult {
+  if (perf.success) return perf;
+  const hints = diagnoseLocalEndpointHints(baseUrl, perf.message);
+  if (hints.length === 0) return perf;
+  return { ...perf, message: `${perf.message}\n${hints.map((h) => `  ↳ ${h}`).join("\n")}` };
+}
+
 
 // ─── Formatting helpers ───────────────────────────────────────────────
 
@@ -1084,7 +1121,7 @@ export default function providerExtension(pi: ExtensionAPI) {
   pi.registerCommand("provider", {
     description: "Manage providers (add / copy / edit / remove / test / check / status / archive)",
     getArgumentCompletions: (prefix) => {
-      const actions = ["add", "copy", "edit", "remove", "test", "check", "status", "archive", "archived", "activate"];
+      const actions = ["add", "copy", "edit", "remove", "test", "check", "check-all", "status", "archive", "archived", "activate"];
       const filtered = actions.filter((a) => fuzzyMatch(a, prefix));
       if (filtered.length > 0) return filtered.map((a) => ({ value: a, label: a }));
       // Secondary completion: after action, suggest provider names (fuzzy, case-insensitive, supports CJK)
@@ -1103,7 +1140,7 @@ export default function providerExtension(pi: ExtensionAPI) {
       const nameArg = firstSpace === -1 ? "" : argStr.slice(firstSpace + 1).trim();
 
       const known = new Set([
-        "add", "copy", "edit", "remove", "test", "check", "status",
+        "add", "copy", "edit", "remove", "test", "check", "check-all", "status",
         "archive", "archived", "list", "activate", "unarchive", "restore",
       ]);
       const runAction = async (cmd: string, named = ""): Promise<void> => {
@@ -1112,7 +1149,11 @@ export default function providerExtension(pi: ExtensionAPI) {
         if (cmd === "edit") return handleEdit(ctx, named);
         if (cmd === "remove") return handleRemove(ctx);
         if (cmd === "test") return handleTest(ctx);
-        if (cmd === "check") return handleCheck(ctx, named);
+        if (cmd === "check-all") return handleCheckAll(ctx);
+        if (cmd === "check") {
+          if (named === "--all" || named === "all") return handleCheckAll(ctx);
+          return handleCheck(ctx, named);
+        }
         if (cmd === "status") return handleStatus(ctx);
         if (cmd === "archive") return handleArchive(ctx, named);
         if (cmd === "archived" || cmd === "list") return handleArchived(ctx);
@@ -1128,12 +1169,14 @@ export default function providerExtension(pi: ExtensionAPI) {
         "Remove    — Remove a provider",
         "Test      — Test provider connectivity",
         "Check     — Re-probe capabilities & adapt compat",
+        "Check-all — Batch full self-check all active providers",
         "Status    — View provider details",
         "Archive   — Move active provider to archived",
         "Archived  — Open archived list / reactivate",
       ], { fuzzy: true });
       if (!selected) return;
-      return runAction(selected.split(" ")[0].toLowerCase());
+      const first = selected.split(" ")[0].toLowerCase();
+      return runAction(first);
     },
   });
 
@@ -1613,13 +1656,14 @@ export default function providerExtension(pi: ExtensionAPI) {
     const { name, config: provider } = result;
     ctx.ui.notify(`Testing "${name}"...`, "info");
 
-    const perf = await testProviderPerformance(
+    let perf = await testProviderPerformance(
       provider.baseUrl,
       provider.apiKey,
       provider.api,
       provider.models,
       provider.headers
     );
+    perf = annotatePerfWithLocalHints(provider.baseUrl, perf);
 
     if (!perf.success) {
       ctx.ui.notify(`Failed: ${perf.message}`, "error");
@@ -1659,7 +1703,114 @@ export default function providerExtension(pi: ExtensionAPI) {
     await enhancedSelect(ctx, "Test results", lines);
   }
 
-  /** Re-probe capabilities and rewrite compat/reasoning flags in models.json. */
+  /**
+   * Batch full self-check for every active provider (concurrency-limited).
+   * Prefer after restore on a new machine: `/provider check --all`.
+   */
+  async function handleCheckAll(ctx: ExtensionCommandContext): Promise<void> {
+    const initial = readModelsJson();
+    const names = Object.keys(initial.providers);
+    if (names.length === 0) {
+      ctx.ui.notify("No active providers to check", "warning");
+      return;
+    }
+
+    const proceed = await ctx.ui.confirm(
+      "Batch self-check",
+      `Run full capability self-check on ${names.length} active provider(s)?\nResults rewrite compat/reasoning flags in models.json.`,
+    );
+    if (!proceed) return ctx.ui.notify("Cancelled", "info");
+
+    const preferReasoning = await ctx.ui.confirm(
+      "Reasoning preference",
+      "Prefer extended thinking when an endpoint supports it?",
+    );
+
+    const CONCURRENCY = 3;
+    type Row = {
+      name: string;
+      ok: boolean;
+      message: string;
+      changes: number;
+      local: boolean;
+      draft?: ProviderConfig;
+    };
+    const rows: Row[] = new Array(names.length);
+    let cursor = 0;
+
+    ctx.ui.notify(`Batch self-check: ${names.length} provider(s), concurrency ${CONCURRENCY}…`, "info");
+
+    async function worker(): Promise<void> {
+      while (true) {
+        const my = cursor++;
+        if (my >= names.length) return;
+        const name = names[my];
+        const provider = initial.providers[name];
+        if (!provider) {
+          rows[my] = { name, ok: false, message: "missing", changes: 0, local: false };
+          continue;
+        }
+        const local = isLocalhostBaseUrl(provider.baseUrl);
+        try {
+          const draft = deepClone(provider);
+          const adapt = await selfCheckAndAdaptProvider(draft, preferReasoning, "full");
+          let message = adapt.message;
+          if (!adapt.ok && local) {
+            const hints = diagnoseLocalEndpointHints(provider.baseUrl, adapt.message);
+            if (hints.length) message = `${adapt.message} | ${hints[0]}`;
+          }
+          rows[my] = {
+            name,
+            ok: adapt.ok,
+            message,
+            changes: adapt.changes.length,
+            local,
+            draft,
+          };
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          rows[my] = {
+            name,
+            ok: false,
+            message: local ? `${msg} | device-local endpoint` : msg,
+            changes: 0,
+            local,
+          };
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, names.length) }, () => worker()));
+
+    // Single write pass to avoid concurrent models.json races.
+    const fresh = readModelsJson();
+    for (const row of rows) {
+      if (!row?.draft || !fresh.providers[row.name]) continue;
+      fresh.providers[row.name] = row.draft;
+    }
+    writeModelsJson(fresh);
+    try {
+      ctx.modelRegistry.refresh();
+    } catch {
+      // ignore
+    }
+
+    const sorted = rows.filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+    const okCount = sorted.filter((r) => r.ok).length;
+    const lines: string[] = [
+      `Batch self-check done: ${okCount}/${sorted.length} ok`,
+      "",
+      ...sorted.map((r) => {
+        const flag = r.ok ? "OK  " : "FAIL";
+        const loc = r.local ? " [local]" : "";
+        const ch = r.changes > 0 ? ` (+${r.changes} flags)` : "";
+        return `${flag} ${r.name}${loc}${ch} — ${r.message}`;
+      }),
+    ];
+    await enhancedSelect(ctx, "Batch check results", lines);
+  }
+
+    /** Re-probe capabilities and rewrite compat/reasoning flags in models.json. */
   async function handleCheck(ctx: ExtensionCommandContext, nameArg = "") {
     const config = readModelsJson();
     let name = nameArg.trim();
@@ -1728,7 +1879,7 @@ export default function providerExtension(pi: ExtensionAPI) {
 
     // ── Provider info ──
     lines.push(`Provider    : ${providerName}`);
-    lines.push(`Endpoint    : ${provider.baseUrl}`);
+    lines.push(`Endpoint    : ${provider.baseUrl}${isLocalhostBaseUrl(provider.baseUrl) ? "  [device-local]" : ""}`);
     lines.push(`API         : ${apiLabel}`);
     lines.push(`API key     : ${provider.apiKey.slice(0, API_KEY_PREVIEW_LENGTH)}${"*".repeat(Math.max(0, provider.apiKey.length - API_KEY_PREVIEW_LENGTH))}`);
     lines.push(`Status      : ${statusIcon} ${perf.message}`);
@@ -1791,13 +1942,14 @@ export default function providerExtension(pi: ExtensionAPI) {
       while (true) {
         ctx.ui.notify("Testing connection...", "info");
 
-        const perf = await testProviderPerformance(
+        let perf = await testProviderPerformance(
           provider.baseUrl,
           provider.apiKey,
           provider.api,
           provider.models,
           provider.headers
         );
+        perf = annotatePerfWithLocalHints(provider.baseUrl, perf);
 
         const lines = renderProviderStatus(providerName, provider, perf);
         await enhancedSelect(ctx, `Status: ${providerName}`, lines);

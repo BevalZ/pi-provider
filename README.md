@@ -15,7 +15,7 @@ When you add or edit a provider, pi-provider probes the endpoint and turns off u
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent).
 
 ```bash
-pi install git:github.com/BevalZ/pi-provider@v1.2.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.0
 ```
 
 Then restart Pi or run `/reload`.
@@ -27,6 +27,7 @@ Then restart Pi or run `/reload`.
 /provider add             Add a provider (save now, background self-check)
 /provider edit [name]     Edit a provider (save now, background self-check)
 /provider check [name]    Full re-probe; rewrite compat/reasoning
+/provider check-all         Full self-check all active providers
 /provider copy [name]     Copy a provider to a new name
 /provider remove          Remove a provider
 /provider test            Connectivity & latency test
@@ -40,7 +41,7 @@ Then restart Pi or run `/reload`.
 
 ```bash
 # 1. Install (pin a release tag for multi-machine consistency)
-pi install git:github.com/BevalZ/pi-provider@v1.2.0
+pi install git:github.com/BevalZ/pi-provider@v1.3.0
 
 # 2. Add a provider
 /provider add
@@ -335,6 +336,12 @@ Run `check-shared` before tagging a release so published files never lag behind 
 - Self-check sends minimal chat probes (`"hi"`, `max_tokens: 1`) to **your** base URL only
 
 ## Changelog
+
+### v1.3.0
+
+- **Device-local / provider-proxy hints** on test/status failure when `baseUrl` is loopback
+- Status shows `[device-local]` badge on localhost endpoints
+- **`/provider check-all`** (also `/provider check --all`): concurrency-3 full self-check of every active provider with a results table
 
 ### v1.2.0
 
